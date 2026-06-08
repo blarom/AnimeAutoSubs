@@ -21,13 +21,15 @@
 
     "content_scripts": [{
         "js": [ "content.js" ],
-        "matches": [ "*://example.com/*" ]
+        "matches": [ "<all_urls>" ],
+        "all_frames": true
     }],
 
     "action": {
         "default_popup": "popup.html",
         "default_icon": "images/toolbar-icon.svg"
     },
-
-    "permissions": [ ]
+    
+    "host_permissions": ["<all_urls>"],
+    "permissions": [ "nativeMessaging" ]
 }
