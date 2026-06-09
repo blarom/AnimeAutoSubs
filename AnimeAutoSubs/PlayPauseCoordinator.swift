@@ -53,16 +53,8 @@ final class PlayPauseCoordinator {
 
     /// User asked for a play/pause toggle (dialog button click). The
     /// command goes to the source. Broadcast aligns when the state
-    /// echo arrives ~250 ms later. We don't gate on `source.isAvailable`
-    /// — sending a command to a source that's not actually reading is
-    /// harmless (nothing happens), and the dashboard already surfaces
-    /// "extension disabled" as a red row. Logging when we suspect the
-    /// extension isn't responding is useful diagnostically without
-    /// silently swallowing the user's intent.
+    /// echo arrives ~250 ms later.
     func userToggle() {
-        if !source.isAvailable {
-            print("[coordinator] toggle requested while source not yet observed (sending anyway)")
-        }
         source.toggle()
     }
 

@@ -6,8 +6,15 @@ struct WizardDialogView: View {
     @ObservedObject var wizard: BroadcastWizard
     @ObservedObject var broadcastManager: BroadcastDelayManager
     @ObservedObject var subtitleManager: SubtitleManager
+    @ObservedObject var extensionBridge: ExtensionBridge
     let onPlayPause: () -> Void
     let onStop: () -> Void
+
+    /// User-dismissed for the current dialog lifetime. Recreated when the
+    /// dialog is re-opened (start broadcast → stop → start), which is the
+    /// right window for the tip to reappear if the connection is still
+    /// silent.
+    @State private var sourceTipDismissed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -79,6 +86,8 @@ struct WizardDialogView: View {
 
     private var broadcastingControls: some View {
         VStack(spacing: 10) {
+            sourceConnectionTip
+
             // Broadcast state indicator. The Safari Web Extension delivers
             // play/pause directly to the source video element, and reports
             // play/pause events back via App Group IPC, so this row stays
@@ -224,6 +233,40 @@ struct WizardDialogView: View {
                 Button("Stop", action: onStop)
                     .controlSize(.small)
             }
+        }
+    }
+
+    /// Soft tip shown while the extension hasn't reported any state event
+    /// in this broadcast session. Most commonly means the user hasn't yet
+    /// triggered playback on the source page so the `<video>` element
+    /// hasn't been instantiated — Play/Pause from the dialog will appear
+    /// to do nothing in that window. The tip auto-disappears the moment
+    /// the bridge sees the first play/pause event, and can be dismissed
+    /// manually.
+    @ViewBuilder
+    private var sourceConnectionTip: some View {
+        if !extensionBridge.isAvailable && !sourceTipDismissed {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundColor(.blue)
+                Text("If Play/Pause has no effect, the source video element hasn't been initialized yet. Click play on the source video in your browser once to wake it up.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button {
+                    sourceTipDismissed = true
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss")
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.blue.opacity(0.08)))
         }
     }
 

@@ -115,6 +115,7 @@ extension AppDelegate {
             wizard: wizard,
             broadcastManager: broadcastManager,
             subtitleManager: subtitleManager,
+            extensionBridge: extensionBridge,
             onPlayPause: { [weak self] in self?.togglePlayPause() },
             onStop: { [weak self] in self?.stopBroadcast() }
         )
