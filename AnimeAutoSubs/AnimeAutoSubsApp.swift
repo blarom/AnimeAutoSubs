@@ -100,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         broadcastManager.restoreSavedOutputDevice()
+        WhisperServer.shared.stop()
     }
 
     // MARK: - Wiring

@@ -53,10 +53,10 @@ enum DependencyCheck {
             terminalCommand: nil
         ),
         Dependency(
-            id: "whisper-cli",
+            id: "whisper-server",
             name: "whisper.cpp",
             purpose: "Transcribes Japanese speech to text in real time.",
-            isPresent: { FileManager.default.fileExists(atPath: "/opt/homebrew/bin/whisper-cli") },
+            isPresent: { FileManager.default.fileExists(atPath: "/opt/homebrew/bin/whisper-server") },
             guiInstructions: "Install Homebrew from brew.sh, then open Terminal and run:  brew install whisper-cpp",
             downloadURL: "https://brew.sh",
             terminalCommand: "brew install whisper-cpp"

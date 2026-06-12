@@ -2,127 +2,157 @@ import Foundation
 
 /// One subtitle segment within a transcribed chunk: the recognized text plus
 /// when (in seconds, relative to the chunk's first sample) the segment begins.
-/// whisper-cli emits these as one timestamped line per segment.
+/// whisper-server emits these as `segments[].start` / `segments[].text` in
+/// the `verbose_json` response body.
 struct WhisperSegment {
     let startSeconds: Double
     let text: String
 }
 
+/// Sends audio chunks to a long-lived `whisper-server` over HTTP. Replaces
+/// the per-chunk `whisper-cli` subprocess model: the model is loaded once
+/// at server start, requests pay only the (tiny) HTTP overhead.
+///
+/// Multiple `WhisperTranscriber` instances share `WhisperServer.shared`.
 class WhisperTranscriber {
-    private let modelPath: String
-    private let whisperPath: String
-    private let tempDir: String
+    private let server: WhisperServer
+    private let urlSession: URLSession
+    private var loggedStartupError = false
 
-    init() {
-        // Application Support is sandbox-/TCC-friendly: no permission prompt
-        // when reading from it (unlike ~/Downloads).
-        let appSupportDir = NSHomeDirectory() + "/Library/Application Support/AnimeAutoSubs"
-        self.modelPath = appSupportDir + "/ggml-small.bin"
-        self.whisperPath = "/opt/homebrew/bin/whisper-cli"
-        self.tempDir = NSTemporaryDirectory() + "AnimeAutoSubs"
-        try? FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
+    init(server: WhisperServer = .shared) {
+        self.server = server
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 60
+        cfg.httpMaximumConnectionsPerHost = 4
+        self.urlSession = URLSession(configuration: cfg)
     }
 
-    /// Transcribe an audio chunk into one or more segments. Each segment carries
-    /// the start offset (seconds from the chunk's first sample) so callers can
-    /// schedule the subtitle for the moment that segment's audio actually plays
-    /// — instead of using the chunk's start time for everything, which makes
-    /// every subtitle in a multi-sentence chunk appear too early.
+    /// Transcribe one VAD-delimited chunk. Each returned segment carries
+    /// its start offset (seconds from the chunk's first sample) so callers
+    /// can schedule the subtitle for the moment that segment's audio
+    /// actually plays.
+    ///
+    /// The `threads` argument is accepted for API compatibility with the
+    /// previous subprocess implementation but is honored at server-startup
+    /// time, not per-request. Whisper-server applies a single thread count
+    /// across its lifetime.
     func transcribe(audioSamples: [Float],
                     sampleRate: Int = Int(BroadcastConstants.whisperSampleRate),
                     threads: Int = 4) -> [WhisperSegment]? {
-        guard FileManager.default.fileExists(atPath: modelPath) else {
-            logModelMissingOnce()
-            return nil
-        }
         guard !isSilent(audioSamples) else { return nil }
 
-        let wavPath = tempDir + "/chunk_\(ProcessInfo.processInfo.globallyUniqueString).wav"
-        defer { try? FileManager.default.removeItem(atPath: wavPath) }
-
-        guard writeWAV(samples: audioSamples, sampleRate: sampleRate, to: wavPath) else {
+        do {
+            try server.ensureStarted()
+        } catch {
+            if !loggedStartupError {
+                loggedStartupError = true
+                print("[whisper] startup failed: \(error)")
+            }
             return nil
         }
+
+        let wavData = buildWAV(samples: audioSamples, sampleRate: sampleRate)
 
         let inDur = Double(audioSamples.count) / Double(sampleRate)
         let started = Date()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: whisperPath)
-        // No --no-timestamps: we want per-segment "[hh:mm:ss.mmm --> ...]" output.
-        process.arguments = [
-            "-m", modelPath,
-            "-l", "ja",
-            "-f", wavPath,
-            "-t", "\(threads)",
-            "--no-prints",
-        ]
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+        guard let json = postInference(wavData: wavData) else { return nil }
+        let segments = parseSegments(from: json)
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            print("[whisper] process failed: \(error)")
-            return nil
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return nil }
-
-        let segments = parseSegments(output)
         let elapsed = Date().timeIntervalSince(started)
         let preview = segments.map(\.text).joined(separator: " | ")
-        print(String(format: "[whisper] in=%.2fs took=%.2fs out=%d → \"%@\"", inDur, elapsed, segments.count, preview))
+        print(String(format: "[whisper] in=%.2fs took=%.2fs out=%d → \"%@\"",
+                     inDur, elapsed, segments.count, preview))
         return segments.isEmpty ? nil : segments
     }
 
-    /// Parse whisper-cli's stdout. Each transcribed segment is one line of:
-    ///   `[HH:MM:SS.mmm --> HH:MM:SS.mmm]   text...`
-    /// We capture the start time and the text body.
-    private static let segmentLinePattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"\[(\d+):(\d+):(\d+)\.(\d+)\s*-->.*?\]\s*(.+)"#)
-    }()
+    // MARK: - HTTP
 
-    private func parseSegments(_ output: String) -> [WhisperSegment] {
-        guard let regex = Self.segmentLinePattern else { return [] }
-        var segments: [WhisperSegment] = []
-        for rawLine in output.components(separatedBy: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty { continue }
-            let nsRange = NSRange(line.startIndex..., in: line)
-            guard let match = regex.firstMatch(in: line, range: nsRange) else { continue }
+    private func postInference(wavData: Data) -> [String: Any]? {
+        let boundary = "AnimeAutoSubsBoundary-\(UUID().uuidString)"
+        var body = Data()
 
-            func numberAt(_ groupIndex: Int) -> Double {
-                guard let range = Range(match.range(at: groupIndex), in: line) else { return 0 }
-                return Double(line[range]) ?? 0
-            }
-            let h = numberAt(1), m = numberAt(2), s = numberAt(3), ms = numberAt(4)
-            let startSeconds = h * 3600 + m * 60 + s + ms / 1000
-
-            guard let textRange = Range(match.range(at: 5), in: line) else { continue }
-            let text = String(line[textRange]).trimmingCharacters(in: .whitespaces)
-            if text.isEmpty { continue }
-            segments.append(WhisperSegment(startSeconds: startSeconds, text: text))
+        func appendString(_ s: String) {
+            body.append(s.data(using: .utf8)!)
         }
-        return segments
+        func appendField(_ name: String, value: String) {
+            appendString("--\(boundary)\r\n")
+            appendString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+            appendString("\(value)\r\n")
+        }
+
+        appendString("--\(boundary)\r\n")
+        appendString("Content-Disposition: form-data; name=\"file\"; filename=\"chunk.wav\"\r\n")
+        appendString("Content-Type: audio/wav\r\n\r\n")
+        body.append(wavData)
+        appendString("\r\n")
+
+        appendField("response_format", value: "verbose_json")
+        appendField("language", value: "ja")
+        appendField("temperature", value: "0.0")
+
+        appendString("--\(boundary)--\r\n")
+
+        var request = URLRequest(url: server.inferenceURL)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var responseError: Error?
+        var responseStatus: Int = 0
+        let task = urlSession.dataTask(with: request) { data, response, error in
+            responseData = data
+            responseError = error
+            if let http = response as? HTTPURLResponse {
+                responseStatus = http.statusCode
+            }
+            semaphore.signal()
+        }
+        task.resume()
+        semaphore.wait()
+
+        if let err = responseError {
+            print("[whisper] HTTP error: \(err.localizedDescription)")
+            return nil
+        }
+        if responseStatus >= 400 {
+            let preview = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            print("[whisper] HTTP \(responseStatus): \(preview.prefix(200))")
+            return nil
+        }
+        guard let data = responseData,
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let json = obj as? [String: Any] else {
+            print("[whisper] failed to parse JSON response")
+            return nil
+        }
+        return json
     }
 
-    private var loggedModelMissing = false
-    private func logModelMissingOnce() {
-        if loggedModelMissing { return }
-        loggedModelMissing = true
-        print("[whisper] model not found at \(modelPath). Place ggml-small.bin in ~/Library/Application Support/AnimeAutoSubs/ to enable transcription.")
+    private func parseSegments(from json: [String: Any]) -> [WhisperSegment] {
+        guard let raw = json["segments"] as? [[String: Any]] else { return [] }
+        var out: [WhisperSegment] = []
+        for seg in raw {
+            let start = (seg["start"] as? Double) ?? 0
+            let text = (seg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if text.isEmpty { continue }
+            out.append(WhisperSegment(startSeconds: start, text: text))
+        }
+        return out
     }
+
+    // MARK: - Utilities
 
     private func isSilent(_ samples: [Float], threshold: Float = 0.008) -> Bool {
         guard !samples.isEmpty else { return true }
         return AudioMath.rms(samples) < threshold
     }
 
-    private func writeWAV(samples: [Float], sampleRate: Int, to path: String) -> Bool {
+    /// Build a 16-bit PCM mono WAV in memory. We don't go through disk —
+    /// the server accepts the bytes directly as the multipart `file` field.
+    private func buildWAV(samples: [Float], sampleRate: Int) -> Data {
         let numSamples = samples.count
         let bitsPerSample: Int = 16
         let numChannels: Int = 1
@@ -132,7 +162,6 @@ class WhisperTranscriber {
         let fileSize = 36 + dataSize
 
         var data = Data()
-
         func appendString(_ s: String) { data.append(contentsOf: s.utf8) }
         func appendUInt32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
         func appendUInt16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
@@ -157,6 +186,6 @@ class WhisperTranscriber {
             withUnsafeBytes(of: intSample.littleEndian) { data.append(contentsOf: $0) }
         }
 
-        return FileManager.default.createFile(atPath: path, contents: data)
+        return data
     }
 }
