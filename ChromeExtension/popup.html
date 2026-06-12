@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {
+                font-family: -apple-system, sans-serif;
+                margin: 0; padding: 16px;
+                width: 240px;
+            }
+            #state { font-size: 13px; margin-bottom: 12px; }
+            #state .label { color: #666; }
+            #state .value { font-weight: 600; }
+            button {
+                width: 100%;
+                padding: 8px;
+                font-size: 14px;
+            }
+            #src {
+                font-size: 10px;
+                color: #888;
+                word-break: break-all;
+                margin-top: 8px;
+                max-height: 60px;
+                overflow: auto;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="state">
+            <div><span class="label">Status:</span> <span class="value" id="status">—</span></div>
+            <div><span class="label">Frame:</span> <span class="value" id="frame">—</span></div>
+            <div id="src"></div>
+        </div>
+        <button id="toggle">Toggle Play/Pause</button>
+        <script src="popup.js"></script>
+    </body>
+</html>

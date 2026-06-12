@@ -264,11 +264,35 @@ extension AppDelegate {
     /// browser bridges are added.
     private func selectBridge(forWindow window: SCWindow) -> VideoControlSource {
         let appName = window.owningApplication?.applicationName ?? "?"
-        // Phase 1a: only the Safari file-IPC bridge exists. HTTP-backed
-        // bridges (and the Chrome bridge) land in Phase 1b — the routing
-        // table below will extend then.
-        print("[bridge-select] window owner=\(appName) → ExtensionBridge (Safari file IPC)")
-        return extensionBridge
+        let lower = appName.lowercased()
+
+        // Safari (and Safari Technology Preview): pick the transport
+        // the user has configured. Default is file IPC during the
+        // verification window for the new HTTP path.
+        if lower.contains("safari") {
+            let mode = UserDefaults.standard.string(forKey: "safariTransport") ?? "file"
+            if mode == "http" {
+                print("[bridge-select] window owner=\(appName) → HTTPExtensionBridge(Safari)")
+                return safariHTTPBridge
+            }
+            print("[bridge-select] window owner=\(appName) → ExtensionBridge (Safari file IPC)")
+            return extensionBridge
+        }
+
+        // Chromium-based browsers all use the same extension API surface
+        // and the same HTTP bridge from our side. The Chrome extension
+        // gets sideloaded in dev mode for now.
+        let chromiumNames = ["chrome", "chromium", "brave", "edge", "arc", "vivaldi", "opera"]
+        if chromiumNames.contains(where: { lower.contains($0) }) {
+            print("[bridge-select] window owner=\(appName) → HTTPExtensionBridge(Chrome)")
+            return chromeHTTPBridge
+        }
+
+        // Unknown browser. Default to Chrome HTTP since most modern
+        // browsers are Chromium-derivatives; the user will see a "no
+        // video reachable" tip if the extension isn't installed.
+        print("[bridge-select] window owner=\(appName) is unknown — defaulting to HTTPExtensionBridge(Chrome)")
+        return chromeHTTPBridge
     }
 
     /// Recompute the broadcast window's frame so the video region stays at

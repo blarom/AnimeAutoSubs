@@ -1,0 +1,36 @@
+{
+    "manifest_version": 3,
+    "name": "AnimeAutoSubs",
+    "version": "1.0",
+    "description": "Companion extension for AnimeAutoSubs — gives the macOS app direct control of the source <video> element.",
+
+    "icons": {
+        "48":  "icons/icon-48.png",
+        "96":  "icons/icon-96.png",
+        "128": "icons/icon-128.png",
+        "256": "icons/icon-256.png",
+        "512": "icons/icon-512.png"
+    },
+
+    "background": {
+        "service_worker": "background.js"
+    },
+
+    "content_scripts": [{
+        "js": ["content.js"],
+        "matches": ["<all_urls>"],
+        "all_frames": true
+    }],
+
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": "icons/icon-48.png"
+    },
+
+    "host_permissions": [
+        "<all_urls>",
+        "http://127.0.0.1:8912/*"
+    ],
+
+    "permissions": ["tabs"]
+}

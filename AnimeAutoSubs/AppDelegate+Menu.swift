@@ -42,6 +42,12 @@ extension AppDelegate: NSMenuDelegate {
         outputDeviceSubmenu = outputDeviceMenu
         rebuildOutputDeviceSubmenu()
 
+        let safariTransportParent = NSMenuItem(title: "Safari Connection (debug)", action: nil, keyEquivalent: "")
+        let safariTransportMenu = NSMenu()
+        safariTransportParent.submenu = safariTransportMenu
+        menu.addItem(safariTransportParent)
+        rebuildSafariTransportSubmenu(safariTransportMenu)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
@@ -168,6 +174,36 @@ extension AppDelegate: NSMenuDelegate {
         let refresh = NSMenuItem(title: "Refresh", action: #selector(refreshOutputDevices), keyEquivalent: "")
         refresh.target = self
         submenu.addItem(refresh)
+    }
+
+    // MARK: - Safari transport submenu
+
+    /// "HTTP" / "File IPC" toggle for which transport the Safari bridge
+    /// uses. Default is `file` while we're verifying the HTTP path in
+    /// real use. Takes effect on the next broadcast (the active bridge
+    /// for the current broadcast is set at `startBroadcast` time).
+    private func rebuildSafariTransportSubmenu(_ submenu: NSMenu) {
+        submenu.removeAllItems()
+        let current = UserDefaults.standard.string(forKey: "safariTransport") ?? "file"
+        let httpItem = NSMenuItem(title: "HTTP (localhost:8912)", action: #selector(selectSafariTransport(_:)), keyEquivalent: "")
+        httpItem.representedObject = "http"
+        httpItem.target = self
+        if current == "http" { httpItem.state = .on }
+        submenu.addItem(httpItem)
+        let fileItem = NSMenuItem(title: "File IPC (App Group)", action: #selector(selectSafariTransport(_:)), keyEquivalent: "")
+        fileItem.representedObject = "file"
+        fileItem.target = self
+        if current == "file" { fileItem.state = .on }
+        submenu.addItem(fileItem)
+    }
+
+    @objc func selectSafariTransport(_ sender: NSMenuItem) {
+        guard let mode = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(mode, forKey: "safariTransport")
+        print("[menu] safariTransport → \(mode) (takes effect on next broadcast)")
+        if let submenu = sender.menu {
+            rebuildSafariTransportSubmenu(submenu)
+        }
     }
 
     @objc func selectOutputDevice(_ sender: NSMenuItem) {

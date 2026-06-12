@@ -70,6 +70,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// user picks a Safari window AND the transport setting is `.file`.
     let extensionBridge = ExtensionBridge()
 
+    /// HTTP server (127.0.0.1:8912) that the HTTP-backed bridges share.
+    /// Always-on at app launch — both browser extensions (Safari in HTTP
+    /// mode, Chrome) talk to it via fetch().
+    let localControlServer = LocalControlServer()
+
+    /// HTTP bridge for Chrome (and Chromium-derived browsers — Brave,
+    /// Edge, Arc, etc.). Receives state events from the Chrome
+    /// extension via `/state`; supplies queued commands via `/poll`.
+    lazy var chromeHTTPBridge = HTTPExtensionBridge(browserName: "Chrome", server: localControlServer)
+
+    /// HTTP bridge for Safari. Used when the `safariTransport`
+    /// preference is `"http"` (the new default once verified). Until
+    /// then, Safari traffic still goes via `extensionBridge`.
+    lazy var safariHTTPBridge = HTTPExtensionBridge(browserName: "Safari", server: localControlServer)
+
     /// Single source of truth the rest of the app talks to. Wraps
     /// whichever concrete bridge matches the currently-active broadcast
     /// (Safari file IPC, Safari HTTP, Chrome HTTP, …). UI binds here so
@@ -100,6 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Touch the coordinator so its lazy init runs and it subscribes
         // to the bridge's state publisher before any broadcast starts.
         _ = playPauseCoordinator
+        // Touch the HTTP bridges so their `init` registers them with
+        // the server before it starts accepting connections.
+        _ = chromeHTTPBridge
+        _ = safariHTTPBridge
+        localControlServer.start()
         setupMenuBar()
         wireWizard()
         wireVocabulary()
@@ -114,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         broadcastManager.restoreSavedOutputDevice()
         WhisperServer.shared.stop()
+        localControlServer.stop()
     }
 
     // MARK: - Wiring

@@ -8,9 +8,40 @@ let lastState = { event: "init", paused: null, src: null, href: null };
 // top frame has no video and silently swallows the command.
 const videoFrames = new Map();
 
+// The Safari extension supports two parallel IPC transports with the
+// Mac app: legacy file-IPC via the native messaging handler, and the
+// newer HTTP server at 127.0.0.1:8912 (same server Chrome uses). The
+// extension always dual-sends state on both channels and dual-polls
+// commands from both channels — the Mac side decides which transport
+// is active for the current broadcast based on the user's preference
+// and only produces commands via the active one. No dedupe needed.
+//
+// Once HTTP is proven across all browsers, the native-messaging path
+// can be deleted (along with SafariWebExtensionHandler.swift, the App
+// Group entitlement, and the related Swift bridge).
+const HTTP_SERVER_BASE = "http://127.0.0.1:8912";
+const BROWSER_ID = "Safari";
+
 const sendStateToNative = (state) => {
     browser.runtime.sendNativeMessage("application.id", { type: "state", state })
         .catch(err => console.log("[bg] native state send failed:", err));
+};
+
+const sendStateToHTTP = (state) => {
+    const body = Object.assign({ browser: BROWSER_ID }, state);
+    fetch(HTTP_SERVER_BASE + "/state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    }).catch(_ => {
+        // Server unreachable — Mac app isn't running, or HTTP bridge
+        // isn't enabled. Native messaging path still works; don't spam.
+    });
+};
+
+const broadcastState = (state) => {
+    sendStateToNative(state);
+    sendStateToHTTP(state);
 };
 
 // Dispatch a generic command to the active tab's video frame. `cmd` is
@@ -52,7 +83,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
             videoFrames.set(sender.tab.id, sender.frameId);
         }
         console.log("[bg] state from content:", msg);
-        sendStateToNative(msg);
+        broadcastState(msg);
     }
 });
 
@@ -78,29 +109,34 @@ browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 });
 
-// Poll the native handler for commands queued by the AppKit app at 10 Hz.
-// 100 ms is fast enough that dialog Play/Pause feels responsive (~250 ms
-// total round-trip including the bridge's state echo) and the file read
-// is cheap (≤ 100 bytes from the App Group container).
-//
-// Commands are pass-through: the file contains "toggle" / "play" / "pause"
-// and we forward to the video. Future-proofs us against any direct command
-// the coordinator might want to send (e.g. seek, set volume).
+// Poll both transports at 10 Hz. The Mac app only produces commands
+// via the active transport (per the safariTransport setting), so at
+// most one of the two polls returns a command on any given tick.
+// Whichever returns first dispatches; the other returns empty.
+const dispatchPolledCommand = (response, source) => {
+    if (response && typeof response.command === "string") {
+        console.log("[bg]", source, "poll → command:", response.command);
+        const extras = {};
+        if (typeof response.time === "number") extras.time = response.time;
+        if (typeof response.delta === "number") extras.delta = response.delta;
+        dispatchToVideo(response.command, extras);
+    }
+};
+
 setInterval(() => {
+    // Native messaging (file IPC) path.
     browser.runtime.sendNativeMessage("application.id", { type: "poll" })
-        .then(response => {
-            if (response && typeof response.command === "string") {
-                console.log("[bg] native poll → command:", response.command);
-                // Forward extra fields (seek time, skip delta) as part of
-                // the message payload so content.js gets them as msg.time
-                // / msg.delta.
-                const extras = {};
-                if (typeof response.time === "number") extras.time = response.time;
-                if (typeof response.delta === "number") extras.delta = response.delta;
-                dispatchToVideo(response.command, extras);
-            }
-        })
+        .then(response => dispatchPolledCommand(response, "native"))
         .catch(err => console.log("[bg] native poll failed:", err));
+
+    // HTTP path.
+    fetch(HTTP_SERVER_BASE + "/poll?browser=" + BROWSER_ID, { method: "GET" })
+        .then(r => r.ok ? r.json() : null)
+        .then(response => dispatchPolledCommand(response, "http"))
+        .catch(_ => {
+            // Server unreachable — Mac app off, or HTTP path disabled.
+            // Native path covers us; don't spam logs.
+        });
 }, 100);
 
 console.log("[bg] background script loaded");
