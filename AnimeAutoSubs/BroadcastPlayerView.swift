@@ -5,14 +5,14 @@ import Combine
 struct BroadcastPlayerView: View {
     @ObservedObject var manager: BroadcastDelayManager
     @ObservedObject var subtitleManager: SubtitleManager
-    @ObservedObject var bridge: ExtensionBridge
+    @ObservedObject var mediaSource: MediaSourceRouter
     let onPlayPause: () -> Void
     let onSkip: (Double) -> Void
     let onSeek: (Double) -> Void
     let onClose: () -> Void
 
     /// While the user is dragging the scrub slider, we stop mirroring
-    /// `bridge.sourceCurrentTime` into the slider value and instead let
+    /// `mediaSource.sourceCurrentTime` into the slider value and instead let
     /// the user's drag control it. `scrubTarget` holds the in-flight
     /// drag value so we can render a hint label and send a single seek
     /// command on release.
@@ -50,7 +50,7 @@ struct BroadcastPlayerView: View {
                         get: { sliderValue },
                         set: { scrubTarget = $0 }
                     ),
-                    in: 0...max(bridge.sourceDuration, 0.001),
+                    in: 0...max(mediaSource.sourceDuration, 0.001),
                     onEditingChanged: { editing in
                         if editing {
                             isScrubbing = true
@@ -76,7 +76,7 @@ struct BroadcastPlayerView: View {
                 }
             }
 
-            Text(formatTime(bridge.sourceDuration))
+            Text(formatTime(mediaSource.sourceDuration))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.white.opacity(0.6))
                 .frame(minWidth: 44, alignment: .leading)
@@ -117,17 +117,17 @@ struct BroadcastPlayerView: View {
     /// Slider position: tracks the user's drag while scrubbing, otherwise
     /// mirrors the live source playback time.
     private var sliderValue: Double {
-        isScrubbing ? scrubTarget : bridge.sourceCurrentTime
+        isScrubbing ? scrubTarget : mediaSource.sourceCurrentTime
     }
 
     /// Current-time label: shows the scrub target while dragging so the
     /// numeric readout matches what the slider thumb is pointing at.
     private var displayedTime: Double {
-        isScrubbing ? scrubTarget : bridge.sourceCurrentTime
+        isScrubbing ? scrubTarget : mediaSource.sourceCurrentTime
     }
 
     private var sourceTimeAvailable: Bool {
-        bridge.sourceDuration > 0
+        mediaSource.sourceDuration > 0
     }
 
     private func formatTime(_ seconds: Double) -> String {

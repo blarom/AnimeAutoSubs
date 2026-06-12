@@ -116,7 +116,7 @@ extension AppDelegate {
             wizard: wizard,
             broadcastManager: broadcastManager,
             subtitleManager: subtitleManager,
-            extensionBridge: extensionBridge,
+            mediaSource: mediaSource,
             onStop: { [weak self] in self?.stopBroadcast() }
         )
         let win = NSWindow(
@@ -159,10 +159,17 @@ extension AppDelegate {
     func startBroadcast(window: SCWindow, sourceRect: CGRect, initialIsPaused: Bool = false) {
         if broadcastWindow != nil { stopBroadcast() }
 
+        // Pick the bridge that matches the selected browser window and
+        // hand it to the router. Everything downstream — coordinator,
+        // dialog UI, broadcast bar — reads through the router so it
+        // doesn't care which concrete transport is active.
+        let bridge = selectBridge(forWindow: window)
+        mediaSource.setActive(bridge)
+
         let view = BroadcastPlayerView(
             manager: broadcastManager,
             subtitleManager: subtitleManager,
-            bridge: extensionBridge,
+            mediaSource: mediaSource,
             onPlayPause: { [weak self] in self?.togglePlayPause() },
             onSkip: { [weak self] delta in self?.skipSource(by: delta) },
             onSeek: { [weak self] time in self?.seekSource(to: time) },
@@ -245,8 +252,23 @@ extension AppDelegate {
         broadcastWindow?.orderOut(nil)
         broadcastWindow = nil
         broadcastVideoRect = nil
+        mediaSource.setActive(nil)
         wizard.abort()
         showPickerWindow()
+    }
+
+    /// Decide which concrete `VideoControlSource` should be active for
+    /// a broadcast session, based on the selected window's owning app
+    /// and (for Safari) the user's transport preference. Lives here so
+    /// the routing rules are in one place — keep this exhaustive as new
+    /// browser bridges are added.
+    private func selectBridge(forWindow window: SCWindow) -> VideoControlSource {
+        let appName = window.owningApplication?.applicationName ?? "?"
+        // Phase 1a: only the Safari file-IPC bridge exists. HTTP-backed
+        // bridges (and the Chrome bridge) land in Phase 1b — the routing
+        // table below will extend then.
+        print("[bridge-select] window owner=\(appName) → ExtensionBridge (Safari file IPC)")
+        return extensionBridge
     }
 
     /// Recompute the broadcast window's frame so the video region stays at

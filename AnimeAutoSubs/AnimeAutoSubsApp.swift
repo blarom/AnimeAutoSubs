@@ -64,16 +64,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let wizard = BroadcastWizard()
     let vocabularyManager = VocabularyManager()
 
-    /// Bridge to the Safari Web Extension. Conforms to `VideoControlSource`,
-    /// so the coordinator (and any future browser bridges) talks to it via
-    /// that abstraction.
+    /// Bridge to the Safari Web Extension via App Group file IPC. The
+    /// long-standing transport — kept while we validate the HTTP path
+    /// in real use. Always alive; routed in via `mediaSource` when the
+    /// user picks a Safari window AND the transport setting is `.file`.
     let extensionBridge = ExtensionBridge()
+
+    /// Single source of truth the rest of the app talks to. Wraps
+    /// whichever concrete bridge matches the currently-active broadcast
+    /// (Safari file IPC, Safari HTTP, Chrome HTTP, …). UI binds here so
+    /// nothing downstream depends on transport choice.
+    let mediaSource = MediaSourceRouter()
 
     /// The single play/pause brain. Mirrors source state to broadcast,
     /// enforces initial pause at broadcast start, owns the only place
     /// `broadcastManager.isPaused` flips for non-stop transitions.
     lazy var playPauseCoordinator: PlayPauseCoordinator = PlayPauseCoordinator(
-        source: extensionBridge,
+        source: mediaSource,
         broadcast: broadcastManager,
         subtitles: subtitleManager
     )

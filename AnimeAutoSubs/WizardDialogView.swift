@@ -6,7 +6,7 @@ struct WizardDialogView: View {
     @ObservedObject var wizard: BroadcastWizard
     @ObservedObject var broadcastManager: BroadcastDelayManager
     @ObservedObject var subtitleManager: SubtitleManager
-    @ObservedObject var extensionBridge: ExtensionBridge
+    @ObservedObject var mediaSource: MediaSourceRouter
     let onStop: () -> Void
 
     /// User-dismissed for the current dialog lifetime. Recreated when the
@@ -231,7 +231,7 @@ struct WizardDialogView: View {
     /// manually.
     @ViewBuilder
     private var sourceConnectionTip: some View {
-        if !extensionBridge.isAvailable && !sourceTipDismissed {
+        if !mediaSource.isAvailable && !sourceTipDismissed {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "info.circle.fill")
                     .foregroundColor(.blue)
