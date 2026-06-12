@@ -13,10 +13,13 @@ const sendStateToNative = (state) => {
         .catch(err => console.log("[bg] native state send failed:", err));
 };
 
-// Dispatch a generic command ("toggle" | "play" | "pause") to the active
-// tab's video frame. Falls back to the top frame if we haven't yet
-// observed which frame owns the video.
-const dispatchToVideo = (cmd) => {
+// Dispatch a generic command to the active tab's video frame. `cmd` is
+// the command name ("toggle" | "play" | "pause" | "seek" | "skip");
+// `extras` is an optional object whose fields are merged into the
+// message payload sent to content.js (e.g. {time: 123.45} for seek,
+// {delta: -10} for skip). Falls back to the top frame if we haven't
+// yet observed which frame owns the video.
+const dispatchToVideo = (cmd, extras = {}) => {
     browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
         if (!tabs[0]) {
             console.log("[bg] dispatchToVideo: no active tab");
@@ -24,14 +27,15 @@ const dispatchToVideo = (cmd) => {
         }
         const tabId = tabs[0].id;
         const frameId = videoFrames.get(tabId);
+        const payload = Object.assign({ cmd }, extras);
         if (frameId !== undefined) {
-            console.log("[bg] dispatch", cmd, "→ tab", tabId, "frame", frameId);
-            browser.tabs.sendMessage(tabId, { cmd }, { frameId }).catch(err =>
+            console.log("[bg] dispatch", cmd, "→ tab", tabId, "frame", frameId, extras);
+            browser.tabs.sendMessage(tabId, payload, { frameId }).catch(err =>
                 console.log("[bg] tabs.sendMessage(frameId) failed:", err)
             );
         } else {
-            console.log("[bg] dispatch", cmd, "→ tab", tabId, "(no known video frame)");
-            browser.tabs.sendMessage(tabId, { cmd }).catch(err =>
+            console.log("[bg] dispatch", cmd, "→ tab", tabId, "(no known video frame)", extras);
+            browser.tabs.sendMessage(tabId, payload).catch(err =>
                 console.log("[bg] tabs.sendMessage(top) failed:", err)
             );
         }
@@ -87,7 +91,13 @@ setInterval(() => {
         .then(response => {
             if (response && typeof response.command === "string") {
                 console.log("[bg] native poll → command:", response.command);
-                dispatchToVideo(response.command);
+                // Forward extra fields (seek time, skip delta) as part of
+                // the message payload so content.js gets them as msg.time
+                // / msg.delta.
+                const extras = {};
+                if (typeof response.time === "number") extras.time = response.time;
+                if (typeof response.delta === "number") extras.delta = response.delta;
+                dispatchToVideo(response.command, extras);
             }
         })
         .catch(err => console.log("[bg] native poll failed:", err));

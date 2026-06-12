@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import ScreenCaptureKit
+import Combine
 
 /// Window lifecycle + key-monitor + coordinate helper.
 /// Properties stay on AppDelegate; methods live here.
@@ -116,7 +117,6 @@ extension AppDelegate {
             broadcastManager: broadcastManager,
             subtitleManager: subtitleManager,
             extensionBridge: extensionBridge,
-            onPlayPause: { [weak self] in self?.togglePlayPause() },
             onStop: { [weak self] in self?.stopBroadcast() }
         )
         let win = NSWindow(
@@ -162,7 +162,10 @@ extension AppDelegate {
         let view = BroadcastPlayerView(
             manager: broadcastManager,
             subtitleManager: subtitleManager,
+            bridge: extensionBridge,
             onPlayPause: { [weak self] in self?.togglePlayPause() },
+            onSkip: { [weak self] delta in self?.skipSource(by: delta) },
+            onSeek: { [weak self] time in self?.seekSource(to: time) },
             onClose: { [weak self] in self?.stopBroadcast() }
         )
 
@@ -174,13 +177,16 @@ extension AppDelegate {
             height: sourceRect.height
         )
         let nsRect = ccgToNSScreen(scFrame: absRect)
+        broadcastVideoRect = nsRect
         let chrome = WindowLayout.broadcastChromeInset
-        let subtitleH = WindowLayout.broadcastSubtitleAllocation
+        let subtitleH = BroadcastConstants.broadcastSubtitleAreaHeight(fontSize: broadcastManager.subtitleFontSize)
+        let playbackH = BroadcastConstants.broadcastPlaybackBarHeight
+        let extras = subtitleH + playbackH
         let winFrame = NSRect(
             x: nsRect.origin.x - chrome,
-            y: nsRect.origin.y - subtitleH - chrome,
+            y: nsRect.origin.y - extras - chrome,
             width: nsRect.width + chrome * 2,
-            height: nsRect.height + subtitleH + chrome * 2
+            height: nsRect.height + extras + chrome * 2
         )
 
         let win = BroadcastWindow(
@@ -204,6 +210,20 @@ extension AppDelegate {
         win.makeKeyAndOrderFront(nil)
         broadcastWindow = win
 
+        // Resize the window when the subtitle font slider moves so the
+        // video region keeps its captured size (the slider changes the
+        // subtitle area's needed height; the window grows around it).
+        // No `.receive(on: RunLoop.main)` — that queues the resize for
+        // the next runloop tick, which causes the video region to
+        // visibly shrink during the drag while the window catches up
+        // only on release. Synchronous resize preempts SwiftUI's render
+        // pass for the same tick so the video stays put throughout.
+        broadcastManager.$subtitleFontSize
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.resizeBroadcastWindowForLayoutChange() }
+            .store(in: &cancellables)
+
         installBroadcastSpacebarMonitor()
         installMediaKeyTap()
 
@@ -224,8 +244,35 @@ extension AppDelegate {
         Task { await broadcastManager.stop() }
         broadcastWindow?.orderOut(nil)
         broadcastWindow = nil
+        broadcastVideoRect = nil
         wizard.abort()
         showPickerWindow()
+    }
+
+    /// Recompute the broadcast window's frame so the video region stays at
+    /// its captured size while the surrounding bars (subtitle area,
+    /// playback bar) absorb their currently-needed heights. Called when
+    /// `subtitleFontSize` changes; the top-left of the window is held
+    /// fixed so the window doesn't jump up the screen.
+    func resizeBroadcastWindowForLayoutChange() {
+        guard let win = broadcastWindow,
+              let videoRect = broadcastVideoRect else { return }
+        let chrome = WindowLayout.broadcastChromeInset
+        let subtitleH = BroadcastConstants.broadcastSubtitleAreaHeight(fontSize: broadcastManager.subtitleFontSize)
+        let playbackH = BroadcastConstants.broadcastPlaybackBarHeight
+        let extras = subtitleH + playbackH
+        let newHeight = videoRect.height + extras + chrome * 2
+        let newWidth = videoRect.width + chrome * 2
+        let current = win.frame
+        let topY = current.origin.y + current.height
+        let newFrame = NSRect(
+            x: current.origin.x,
+            y: topY - newHeight,
+            width: newWidth,
+            height: newHeight
+        )
+        if abs(newFrame.size.height - current.size.height) < 0.5 { return }
+        win.setFrame(newFrame, display: true, animate: false)
     }
 
     // MARK: - Broadcast-window keystroke monitor

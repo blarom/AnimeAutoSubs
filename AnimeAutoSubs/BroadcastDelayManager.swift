@@ -92,15 +92,11 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
     // MARK: - Published state
 
     @Published private(set) var mode: Mode = .idle
-    @Published var delaySeconds: Double = BroadcastConstants.defaultDelaySeconds {
-        didSet {
-            UserDefaults.standard.set(delaySeconds, forKey: "broadcastDelaySeconds")
-            // Changing the delay invalidates the current buffer — re-warmup with the new delay.
-            if engineSetupComplete && oldValue != delaySeconds {
-                rewarmupForDelayChange()
-            }
-        }
-    }
+    /// Fixed at startup. Whisper warmup and capture buffer don't tolerate
+    /// shorter values; longer values just add lag with no upside. Used to
+    /// be exposed as a slider — removed because no realistic use case for
+    /// tuning it.
+    let delaySeconds: Double = BroadcastConstants.defaultDelaySeconds
     @Published private(set) var sourceWindowSize: CGSize = .zero
     @Published var blurEnglishSubtitles: Bool = false {
         didSet { UserDefaults.standard.set(blurEnglishSubtitles, forKey: "blurEnglishSubtitles") }
@@ -245,10 +241,6 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
         if let savedVolume = UserDefaults.standard.object(forKey: "broadcastOutputVolume") as? Float,
            BroadcastConstants.volumeRange.contains(savedVolume) {
             outputVolume = savedVolume
-        }
-        if let savedDelay = UserDefaults.standard.object(forKey: "broadcastDelaySeconds") as? Double,
-           BroadcastConstants.delaySecondsRange.contains(savedDelay) {
-            delaySeconds = savedDelay
         }
         if let qualityRaw = UserDefaults.standard.string(forKey: "captureQuality"),
            let q = CaptureQuality(rawValue: qualityRaw) {
@@ -435,6 +427,29 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
             pauseStartTime = nil
             if audioEngine.isRunning { playerNode.play() }
         }
+    }
+
+    /// Discard buffered video/audio and re-warm. Called by the coordinator
+    /// after the user seeks the source — the frames we've captured are
+    /// now at the wrong media time, so we throw them away and rebuild a
+    /// fresh `delaySeconds`-long window from what the capture stream
+    /// sends next. The broadcast view shows the "Buffering…" overlay
+    /// during the warmup.
+    ///
+    /// `playerNode.reset()` (not `stop()`) clears the pre-seek scheduled
+    /// buffers without putting the node into a stopped state — when the
+    /// pump starts scheduling fresh buffers after rebuffer, they play
+    /// immediately without needing another `play()` call.
+    func flushAndRebuffer() {
+        queueLock.lock()
+        videoQueue.removeAll()
+        audioQueue.removeAll()
+        queueLock.unlock()
+        captureStartTime = CACurrentMediaTime()
+        hasStartedPlayback = false
+        pauseStartTime = nil
+        playerNode.reset()
+        mode = .buffering(progress: 0)
     }
 
     // MARK: - Audio routing
@@ -648,6 +663,11 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
             } catch {
                 print("[audio] engine.start() failed: \(error)")
             }
+        } else if !playerNode.isPlaying {
+            // Engine already running but playerNode is stopped/reset —
+            // happens after `flushAndRebuffer()` finishes its warmup.
+            // Kick the node so newly scheduled buffers actually render.
+            playerNode.play()
         }
         self.mode = .playing
     }
@@ -669,16 +689,6 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
             return builtIn.id
         }
         return devices.first?.id
-    }
-
-    private func rewarmupForDelayChange() {
-        queueLock.lock()
-        videoQueue.removeAll()
-        audioQueue.removeAll()
-        queueLock.unlock()
-        captureStartTime = CACurrentMediaTime()
-        hasStartedPlayback = false
-        mode = .buffering(progress: 0)
     }
 
     @objc private func audioEngineConfigurationChanged(_ notification: Notification) {

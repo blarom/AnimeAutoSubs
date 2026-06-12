@@ -47,6 +47,22 @@ final class PlayPauseCoordinator {
                 self?.alignBroadcast(toSourcePlaying: sourcePlaying)
             }
             .store(in: &cancellables)
+
+        // When the source seeks, the broadcast's buffered frames are at
+        // the wrong media time — flush and re-warm, and drop any
+        // already-visible subtitles since they belong to the pre-seek
+        // playhead. In-flight whisper jobs from before the seek may still
+        // produce one or two subtitles for the old position; they'll
+        // expire naturally via the persistence timer.
+        source.sourceDidSeekPublisher
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in
+                guard let self = self else { return }
+                print("[coordinator] source seeked → flushing broadcast buffer + subtitles")
+                self.broadcast?.flushAndRebuffer()
+                self.subtitles?.clear()
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - User-initiated commands
@@ -56,6 +72,19 @@ final class PlayPauseCoordinator {
     /// echo arrives ~250 ms later.
     func userToggle() {
         source.toggle()
+    }
+
+    /// User asked to skip the source by `delta` seconds (negative rewinds).
+    /// Broadcast buffer flushes via the `sourceDidSeek` subscription wired
+    /// in `wireUp()`.
+    func userSkip(by delta: Double) {
+        source.skip(by: delta)
+    }
+
+    /// User asked to seek the source to an absolute media time (slider
+    /// release). Broadcast flush handled via the subscription.
+    func userSeek(to time: Double) {
+        source.seek(to: time)
     }
 
     // MARK: - Lifecycle

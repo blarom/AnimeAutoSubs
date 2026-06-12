@@ -45,9 +45,9 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 responseBody = ["ok": true]
 
             case "poll":
-                if let cmd = readAndClearCommand() {
-                    os_log(.default, "[handler] command → %{public}@", String(describing: cmd))
-                    responseBody = ["command": cmd]
+                if let cmdDict = readAndClearCommand() {
+                    os_log(.default, "[handler] command → %{public}@", String(describing: cmdDict))
+                    responseBody = cmdDict
                 } else {
                     responseBody = [:]
                 }
@@ -78,10 +78,11 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
     }
 
-    /// Reads `command.json`, returns the embedded `command` string, and
-    /// deletes the file so the same command isn't processed twice. The
-    /// id field embedded in the JSON is preserved only for logging.
-    private func readAndClearCommand() -> String? {
+    /// Reads `command.json`, returns the embedded command dict (`command`
+    /// string plus any extras like `time` or `delta`), and deletes the
+    /// file so the same command isn't processed twice. The id field is
+    /// preserved only for logging.
+    private func readAndClearCommand() -> [String: Any]? {
         guard let url = commandURL else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
         try? FileManager.default.removeItem(at: url)
@@ -91,6 +92,6 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         if let id = dict["id"] as? String {
             os_log(.default, "[handler] consumed command id=%{public}@", id)
         }
-        return dict["command"] as? String
+        return dict
     }
 }

@@ -5,16 +5,145 @@ import Combine
 struct BroadcastPlayerView: View {
     @ObservedObject var manager: BroadcastDelayManager
     @ObservedObject var subtitleManager: SubtitleManager
+    @ObservedObject var bridge: ExtensionBridge
     let onPlayPause: () -> Void
+    let onSkip: (Double) -> Void
+    let onSeek: (Double) -> Void
     let onClose: () -> Void
+
+    /// While the user is dragging the scrub slider, we stop mirroring
+    /// `bridge.sourceCurrentTime` into the slider value and instead let
+    /// the user's drag control it. `scrubTarget` holds the in-flight
+    /// drag value so we can render a hint label and send a single seek
+    /// command on release.
+    @State private var isScrubbing = false
+    @State private var scrubTarget: Double = 0
 
     var body: some View {
         VStack(spacing: 0) {
             videoArea
             subtitleArea
+            playbackBar
         }
         .background(Color.black)
     }
+
+    // MARK: - Playback controls (bottom bar)
+
+    private var playbackBar: some View {
+        HStack(spacing: 6) {
+            playPauseButton
+            skipButton(systemName: "gobackward.30", delta: -30, help: "Skip back 30 seconds")
+            skipButton(systemName: "gobackward.10", delta: -10, help: "Skip back 10 seconds")
+            skipButton(systemName: "goforward.10",  delta:  10, help: "Skip forward 10 seconds")
+            skipButton(systemName: "goforward.30",  delta:  30, help: "Skip forward 30 seconds")
+
+            Text(formatTime(displayedTime))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.white.opacity(0.85))
+                .frame(minWidth: 44, alignment: .trailing)
+                .padding(.leading, 4)
+
+            ZStack(alignment: .top) {
+                Slider(
+                    value: Binding(
+                        get: { sliderValue },
+                        set: { scrubTarget = $0 }
+                    ),
+                    in: 0...max(bridge.sourceDuration, 0.001),
+                    onEditingChanged: { editing in
+                        if editing {
+                            isScrubbing = true
+                            scrubTarget = sliderValue
+                        } else {
+                            isScrubbing = false
+                            onSeek(scrubTarget)
+                        }
+                    }
+                )
+                .disabled(!sourceTimeAvailable)
+                .tint(.white)
+
+                if isScrubbing {
+                    Text(formatTime(scrubTarget))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.8)))
+                        .foregroundColor(.white)
+                        .offset(y: -22)
+                        .allowsHitTesting(false)
+                }
+            }
+
+            Text(formatTime(bridge.sourceDuration))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.white.opacity(0.6))
+                .frame(minWidth: 44, alignment: .leading)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: BroadcastConstants.broadcastPlaybackBarHeight)
+        .background(Color.black)
+    }
+
+    private var playPauseButton: some View {
+        Button(action: onPlayPause) {
+            Image(systemName: manager.isPaused ? "play.fill" : "pause.fill")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(.white)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+        .disabled(!manager.engineSetupComplete)
+        .opacity(manager.engineSetupComplete ? 1.0 : 0.35)
+        .help(manager.isPaused ? "Play (source + broadcast)" : "Pause (source + broadcast)")
+    }
+
+    private func skipButton(systemName: String, delta: Double, help: String) -> some View {
+        Button {
+            onSkip(delta)
+        } label: {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(.white)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+        .disabled(!sourceTimeAvailable)
+        .opacity(sourceTimeAvailable ? 1.0 : 0.35)
+        .help(help)
+    }
+
+    /// Slider position: tracks the user's drag while scrubbing, otherwise
+    /// mirrors the live source playback time.
+    private var sliderValue: Double {
+        isScrubbing ? scrubTarget : bridge.sourceCurrentTime
+    }
+
+    /// Current-time label: shows the scrub target while dragging so the
+    /// numeric readout matches what the slider thumb is pointing at.
+    private var displayedTime: Double {
+        isScrubbing ? scrubTarget : bridge.sourceCurrentTime
+    }
+
+    private var sourceTimeAvailable: Bool {
+        bridge.sourceDuration > 0
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds)
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        } else {
+            return String(format: "%d:%02d", m, s)
+        }
+    }
+
+    // MARK: - Video area
 
     private var videoArea: some View {
         ZStack(alignment: .topTrailing) {
@@ -120,7 +249,7 @@ struct BroadcastPlayerView: View {
     /// other slot or the video) — that's the explicit trade-off the user wants
     /// instead of the area growing and pushing the video around.
     private var subtitleAreaHeight: CGFloat {
-        rowHeight * 2 + 6 + 28
+        BroadcastConstants.broadcastSubtitleAreaHeight(fontSize: manager.subtitleFontSize)
     }
 
     /// Fixed slot height per row. An empty row renders Color.clear at this height

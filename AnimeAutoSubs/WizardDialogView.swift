@@ -7,7 +7,6 @@ struct WizardDialogView: View {
     @ObservedObject var broadcastManager: BroadcastDelayManager
     @ObservedObject var subtitleManager: SubtitleManager
     @ObservedObject var extensionBridge: ExtensionBridge
-    let onPlayPause: () -> Void
     let onStop: () -> Void
 
     /// User-dismissed for the current dialog lifetime. Recreated when the
@@ -106,21 +105,16 @@ struct WizardDialogView: View {
                 }
                 .controlSize(.small)
                 .help("Flip the broadcast's belief of source state without sending a command. Use when the source was toggled outside the app.")
+                Button(action: onStop) {
+                    Image(systemName: "stop.fill")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Stop broadcasting")
             }
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
-
-            HStack(spacing: 8) {
-                Button(action: handlePlayPause) {
-                    HStack {
-                        Image(systemName: "playpause.fill")
-                        Text("Play/Pause")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .disabled(!isReadyForToggle)
-                .help(isReadyForToggle ? "Toggles both source and delayed video" : "Waiting for buffer…")
-            }
 
             // Volume
             labeledSlider(title: "Volume", icon: volumeIcon) {
@@ -154,12 +148,6 @@ struct WizardDialogView: View {
                 Spacer()
             }
             .help("Where the delayed audio is being sent. Change in 字 → Audio Output (delayed).")
-
-            // Delay slider
-            labeledSlider(title: "Buffer delay", icon: "clock.arrow.circlepath") {
-                Slider(value: $broadcastManager.delaySeconds, in: BroadcastConstants.delaySecondsRange)
-                trailingValue(String(format: "%.1fs", broadcastManager.delaySeconds))
-            }
 
             // Subtitle font size
             labeledSlider(title: "Subtitle font size", icon: "textformat.size") {
@@ -230,8 +218,6 @@ struct WizardDialogView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                Button("Stop", action: onStop)
-                    .controlSize(.small)
             }
         }
     }
@@ -270,10 +256,6 @@ struct WizardDialogView: View {
         }
     }
 
-    private func handlePlayPause() {
-        onPlayPause()
-    }
-
     @ViewBuilder
     private func labeledSlider<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -294,10 +276,6 @@ struct WizardDialogView: View {
             .font(.caption.monospacedDigit())
             .frame(width: 36, alignment: .trailing)
             .foregroundColor(.secondary)
-    }
-
-    private var isReadyForToggle: Bool {
-        broadcastManager.engineSetupComplete
     }
 
     private var volumeIcon: String {

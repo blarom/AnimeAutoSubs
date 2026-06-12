@@ -12,16 +12,32 @@ const reportState = (event) => {
         paused: v ? v.paused : null,
         src: v ? v.currentSrc : null,
         href: location.href,
+        currentTime: v ? v.currentTime : null,
+        duration: v && isFinite(v.duration) ? v.duration : null,
     };
     browser.runtime.sendMessage(payload).catch(() => {});
     log(payload);
 };
 
+// `timeupdate` fires natively at ~4 Hz during playback. That's a fine
+// rate for the UI scrubber, but we still throttle to a minimum 250 ms
+// gap in case a player implementation fires more aggressively.
+let lastTimeUpdateAt = 0;
+const onTimeUpdate = () => {
+    const now = Date.now();
+    if (now - lastTimeUpdateAt < 250) return;
+    lastTimeUpdateAt = now;
+    reportState("timeupdate");
+};
+
 const observe = (v) => {
     if (v.dataset.animeAutoSubObserved) return;
     v.dataset.animeAutoSubObserved = "true";
-    v.addEventListener("play",  () => reportState("play"));
-    v.addEventListener("pause", () => reportState("pause"));
+    v.addEventListener("play",        () => reportState("play"));
+    v.addEventListener("pause",       () => reportState("pause"));
+    v.addEventListener("seeked",      () => reportState("seeked"));
+    v.addEventListener("durationchange", () => reportState("durationchange"));
+    v.addEventListener("timeupdate",  onTimeUpdate);
     reportState("found");
 };
 
@@ -63,6 +79,22 @@ browser.runtime.onMessage.addListener((msg) => {
                 log("pause");
             } else {
                 log("pause (already paused, no-op)");
+            }
+            break;
+        case "seek":
+            if (typeof msg.time === "number" && isFinite(msg.time)) {
+                const dur = isFinite(v.duration) ? v.duration : Number.POSITIVE_INFINITY;
+                const target = Math.max(0, Math.min(dur, msg.time));
+                v.currentTime = target;
+                log(`seek: → ${target.toFixed(2)}s`);
+            }
+            break;
+        case "skip":
+            if (typeof msg.delta === "number" && isFinite(msg.delta)) {
+                const dur = isFinite(v.duration) ? v.duration : Number.POSITIVE_INFINITY;
+                const target = Math.max(0, Math.min(dur, v.currentTime + msg.delta));
+                v.currentTime = target;
+                log(`skip: ${msg.delta > 0 ? "+" : ""}${msg.delta}s → ${target.toFixed(2)}s`);
             }
             break;
         default:

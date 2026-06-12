@@ -31,6 +31,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var dashboardWindow: NSWindow?
     var vocabularyWindow: NSWindow?
 
+    /// Video region (in screen coordinates) of the currently active
+    /// broadcast — kept around so the broadcast window can be resized
+    /// when the subtitle font size changes, without affecting the video
+    /// area's size or position.
+    var broadcastVideoRect: NSRect?
+
     // Status menu
     var statusItem: NSStatusItem?
     var primaryMenuItem: NSMenuItem?
@@ -145,5 +151,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// echo arrives ~250 ms later.
     func togglePlayPause() {
         playPauseCoordinator.userToggle()
+    }
+
+    /// Skip the source ±N seconds. Wired to the broadcast window's
+    /// playback bar buttons.
+    func skipSource(by delta: Double) {
+        playPauseCoordinator.userSkip(by: delta)
+    }
+
+    /// Jump the source to an absolute media time. Wired to the broadcast
+    /// window's scrub slider on release.
+    func seekSource(to time: Double) {
+        playPauseCoordinator.userSeek(to: time)
     }
 }

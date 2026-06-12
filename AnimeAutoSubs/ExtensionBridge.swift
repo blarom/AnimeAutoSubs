@@ -31,6 +31,23 @@ final class ExtensionBridge: ObservableObject, VideoControlSource {
     @Published private(set) var observedSourcePlaying: Bool? = nil
     @Published private(set) var isAvailable: Bool = false
 
+    /// Live playback position of the source video, in seconds. Updated
+    /// from the `timeupdate` events the content script forwards (~4 Hz
+    /// during playback). Used by the broadcast playback bar's scrubber.
+    @Published private(set) var sourceCurrentTime: Double = 0
+
+    /// Duration of the source video, in seconds. Updated from `found`
+    /// and `durationchange` events. May be 0 if the source hasn't yet
+    /// loaded metadata.
+    @Published private(set) var sourceDuration: Double = 0
+
+    /// Fires whenever the bridge issues a seek/skip command. Coordinators
+    /// subscribe to flush the broadcast buffer (the captured frames are
+    /// now at the wrong time relative to the source). External seeks
+    /// (user clicking on the source player UI directly) are NOT detected
+    /// here — for v1, that's a known limitation.
+    let sourceDidSeek = PassthroughSubject<Void, Never>()
+
     /// Most recent state event from the extension (full payload, including
     /// the URL of the frame that owns the video). Currently only used by
     /// the dialog UI for the "Detected" indicator.
@@ -42,6 +59,18 @@ final class ExtensionBridge: ObservableObject, VideoControlSource {
 
     var isAvailablePublisher: AnyPublisher<Bool, Never> {
         $isAvailable.eraseToAnyPublisher()
+    }
+
+    var sourceCurrentTimePublisher: AnyPublisher<Double, Never> {
+        $sourceCurrentTime.eraseToAnyPublisher()
+    }
+
+    var sourceDurationPublisher: AnyPublisher<Double, Never> {
+        $sourceDuration.eraseToAnyPublisher()
+    }
+
+    var sourceDidSeekPublisher: AnyPublisher<Void, Never> {
+        sourceDidSeek.eraseToAnyPublisher()
     }
 
     struct VideoState: Equatable {
@@ -85,19 +114,34 @@ final class ExtensionBridge: ObservableObject, VideoControlSource {
     func play()   { writeCommand("play") }
     func pause()  { writeCommand("pause") }
 
+    func seek(to time: Double) {
+        writeCommand("seek", extras: ["time": time])
+        sourceDidSeek.send()
+    }
+
+    func skip(by delta: Double) {
+        writeCommand("skip", extras: ["delta": delta])
+        sourceDidSeek.send()
+    }
+
     /// Force `observedSourcePlaying` to refresh from disk.
     func refresh() { tickState() }
 
     // MARK: - Internals
 
-    private func writeCommand(_ command: String) {
+    private func writeCommand(_ command: String, extras: [String: Any] = [:]) {
         guard let url = commandURL() else { return }
         let id = UUID().uuidString
-        let payload: [String: Any] = ["id": id, "command": command]
+        var payload: [String: Any] = ["id": id, "command": command]
+        for (k, v) in extras { payload[k] = v }
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
         do {
             try data.write(to: url, options: .atomic)
-            print("[bridge] queued \(command) id=\(id)")
+            if extras.isEmpty {
+                print("[bridge] queued \(command) id=\(id)")
+            } else {
+                print("[bridge] queued \(command) id=\(id) \(extras)")
+            }
         } catch {
             print("[bridge] failed to write command.json: \(error)")
         }
@@ -143,6 +187,16 @@ final class ExtensionBridge: ObservableObject, VideoControlSource {
         if observedSourcePlaying != nowPlaying {
             observedSourcePlaying = nowPlaying
         }
+
+        // Time + duration come through on every state event. Update only
+        // on meaningful change to avoid thrashing @Published downstream.
+        if let t = dict["currentTime"] as? Double, abs(sourceCurrentTime - t) > 0.05 {
+            sourceCurrentTime = t
+        }
+        if let d = dict["duration"] as? Double, abs(sourceDuration - d) > 0.05 {
+            sourceDuration = d
+        }
+
         updateAvailability()
     }
 

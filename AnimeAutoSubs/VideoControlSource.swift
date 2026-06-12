@@ -41,9 +41,29 @@ protocol VideoControlSource: AnyObject {
     /// Combine publisher for `isAvailable`.
     var isAvailablePublisher: AnyPublisher<Bool, Never> { get }
 
+    /// Live source-video playback position, in seconds.
+    var sourceCurrentTime: Double { get }
+    var sourceCurrentTimePublisher: AnyPublisher<Double, Never> { get }
+
+    /// Source-video duration, in seconds. Zero if not yet known.
+    var sourceDuration: Double { get }
+    var sourceDurationPublisher: AnyPublisher<Double, Never> { get }
+
+    /// Fires whenever this source issues a seek/skip command. Subscribers
+    /// (typically the coordinator) react by flushing downstream buffers.
+    var sourceDidSeekPublisher: AnyPublisher<Void, Never> { get }
+
     /// Send a command to the source video. The mutation is asynchronous —
     /// observe `observedSourcePlaying` to know when it took effect.
     func play()
     func pause()
     func toggle()
+
+    /// Jump the source to an absolute time in seconds. Implementations
+    /// should clamp to `[0, duration]`.
+    func seek(to time: Double)
+
+    /// Advance/rewind the source by `delta` seconds (negative rewinds).
+    /// Implementations should clamp to `[0, duration]`.
+    func skip(by delta: Double)
 }
