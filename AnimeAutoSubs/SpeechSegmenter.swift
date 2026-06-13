@@ -18,7 +18,7 @@ import AVFoundation
 ///   through the delay buffer (segmentStartTime + delaySeconds).
 ///
 /// `maxSegmentSamples` force-emits long monologues so transcription latency
-/// always fits inside the 5-second playback delay budget.
+/// always fits inside the broadcast playback delay budget.
 final class SpeechSegmenter {
     /// Emitted when a segment finishes (silence-end or force-split).
     /// `startTime` is `CACurrentMediaTime()` at the first sample of the

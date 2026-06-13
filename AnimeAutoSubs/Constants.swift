@@ -9,7 +9,9 @@ enum BroadcastConstants {
     /// at least this long to warm up before frames are ready, so we don't
     /// expose it as a slider — going lower drops the first few seconds of
     /// playback; going higher just adds lag without a corresponding gain.
-    static let defaultDelaySeconds: Double = 5.0
+    /// Sized to comfortably accommodate VAD-emitted segments up to 4 s
+    /// plus whisper inference (typically 1.4–1.6 s on the medium model).
+    static let defaultDelaySeconds: Double = 6.0
 
     /// Pump tick interval (~125Hz). Decoupled from capture FPS so audio scheduling stays smooth.
     static let pumpTickMilliseconds: Int = 8

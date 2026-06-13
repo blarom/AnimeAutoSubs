@@ -66,6 +66,39 @@ class WhisperTranscriber {
         return segments.isEmpty ? nil : segments
     }
 
+    /// Force whisper-server to load the model now, before the first
+    /// real segment arrives. Without this, the first user-facing
+    /// transcription pays ~9 seconds of model-load latency (visible
+    /// as 5+ second LATE markers on the first batch of subtitles).
+    /// Idempotent and safe to call repeatedly — once the model is
+    /// loaded, subsequent inferences pay only the per-request cost.
+    /// Blocks the calling thread; spawn from a background `Task`.
+    func warmUp() {
+        do {
+            try server.ensureStarted()
+        } catch {
+            if !loggedStartupError {
+                loggedStartupError = true
+                print("[whisper] warmup ensureStarted failed: \(error)")
+            }
+            return
+        }
+        // 200 ms of low-amplitude 100 Hz tone. Above the silence gate
+        // so the request reaches whisper-cpp; quiet enough that the
+        // model returns no segments. We discard the result — only the
+        // model-load side effect matters.
+        let sr = Int(BroadcastConstants.whisperSampleRate)
+        let n = sr / 5
+        let samples: [Float] = (0..<n).map { i in
+            sin(Float(i) * 2 * .pi * 100 / Float(sr)) * 0.05
+        }
+        let wav = buildWAV(samples: samples, sampleRate: sr)
+        let started = Date()
+        _ = postInference(wavData: wav)
+        print(String(format: "[whisper] warmup completed in %.2fs (model now resident)",
+                     Date().timeIntervalSince(started)))
+    }
+
     // MARK: - HTTP
 
     private func postInference(wavData: Data) -> [String: Any]? {
