@@ -114,6 +114,11 @@ const ensureKeepAlivePort = () => {
     try {
         keepAlivePort = ext.runtime.connect({ name: KEEPALIVE_NAME });
         keepAlivePort.onDisconnect.addListener(() => {
+            // Reading lastError inside the disconnect callback consumes
+            // it so Chrome doesn't log an "Unchecked runtime.lastError"
+            // warning when the port is torn down because the page was
+            // moved into the back/forward cache.
+            void ext.runtime.lastError;
             keepAlivePort = null;
             setTimeout(ensureKeepAlivePort, 1000);
         });

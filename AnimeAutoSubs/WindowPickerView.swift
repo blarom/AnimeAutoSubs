@@ -102,6 +102,19 @@ struct WindowPickerView: View {
 
     private func wireBroadcastTranscription() {
         broadcastManager.onSpeechSegmentReady = { [self] samples, segmentStartCMTime in
+            // Drop segments whose audio was captured before the most
+            // recent seek — they belong to the pre-seek playhead and
+            // would otherwise surface as stale subtitles a few seconds
+            // after the rebuffer (either because the VAD was still
+            // sitting on pre-seek audio when the seek fired, or because
+            // a whisper job started before the seek finished after it).
+            // The same check runs again after whisper returns; this
+            // early bail also avoids wasting CPU on doomed transcriptions.
+            if segmentStartCMTime < broadcastManager.lastSeekAt {
+                print(String(format: "[seg %.3f] dropped pre-seek (lastSeek=%.3f)",
+                             segmentStartCMTime, broadcastManager.lastSeekAt))
+                return
+            }
             // Time the segment was emitted by the VAD (now). Used as the
             // baseline for queue wait + total latency calculations below.
             let emittedAt = Date()
@@ -121,6 +134,16 @@ struct WindowPickerView: View {
                 guard let whisperSegments = whisper.transcribe(audioSamples: samples, threads: threads) else {
                     print(String(format: "[seg %.3f] transcribe returned nil (silent or model missing) inflight=%d",
                                  segmentStartCMTime, inflightAtStart))
+                    return
+                }
+
+                // Re-check after whisper: a seek may have happened while
+                // this job was running. Same rule as the pre-queue check
+                // above — discard so the user doesn't see lines from the
+                // pre-seek timeline pop in once the rebuffer settles.
+                if segmentStartCMTime < broadcastManager.lastSeekAt {
+                    print(String(format: "[seg %.3f] dropped post-whisper (seek during transcription)",
+                                 segmentStartCMTime))
                     return
                 }
 

@@ -11,24 +11,35 @@ import Combine
 /// extension popup Toggle, manual click on the source player) ultimately
 /// commands the source video. The video toggles, fires a play/pause
 /// event, and the resulting state echoes back through the bridge. The
-/// coordinator's sink updates broadcast state to match. One direction of
-/// state flow, no feedback loops, no temporal gates.
+/// coordinator's sink updates broadcast state to match.
 ///
-/// **Initial state**: when broadcast starts, `enforceInitialPause()` is
-/// called. The coordinator sends a `pause()` command to the source so
-/// the user always begins from a known paused state, regardless of what
-/// the source was doing.
+/// **Initial state**: when broadcast starts, `enforceInitialPause()`
+/// sends `pause()` to the source so the user always begins from a known
+/// paused state, regardless of what the source was doing.
 ///
-/// **Buffering**: while broadcast is in `.buffering` mode, the
-/// coordinator still aligns `isPaused` immediately. The pump won't
-/// emit frames until warmup completes, but the published state is
-/// accurate.
+/// **Seek**: when the bridge fires `sourceDidSeek`, the coordinator
+/// flushes the broadcast's capture buffer, clears subtitles, and
+/// briefly suppresses state alignment until the rebuffer settles —
+/// source players commonly fire transient `pause`/`play` events during
+/// a seek and we don't want those baked into the broadcast's state.
+/// See `suppressAlignmentUntil`.
 @MainActor
 final class PlayPauseCoordinator {
     private let source: VideoControlSource
     private weak var broadcast: BroadcastDelayManager?
     private weak var subtitles: SubtitleManager?
     private var cancellables: Set<AnyCancellable> = []
+
+    /// When non-nil, `alignBroadcast(toSourcePlaying:)` is a no-op until
+    /// the given time. Set on a user-initiated seek for the duration of
+    /// the rebuffer window so transient `pause`/`play` events fired by
+    /// the source's player JS during the seek don't propagate to the
+    /// broadcast — which would otherwise leave the broadcast paused
+    /// even though both source and broadcast were playing before the
+    /// seek. After the window ends, the next state event (or our
+    /// explicit re-sync) aligns broadcast with whatever the source's
+    /// real, stable state is.
+    private var suppressAlignmentUntil: Date?
 
     init(source: VideoControlSource,
          broadcast: BroadcastDelayManager,
@@ -59,8 +70,24 @@ final class PlayPauseCoordinator {
             .sink { [weak self] in
                 guard let self = self else { return }
                 print("[coordinator] source seeked → flushing broadcast buffer + subtitles")
+                let delay = self.broadcast?.delaySeconds ?? 5
+                // Suppress alignment for the rebuffer window + a small
+                // grace period (source player's first stable state event
+                // after the seek may take a beat).
+                self.suppressAlignmentUntil = Date().addingTimeInterval(delay + 0.5)
                 self.broadcast?.flushAndRebuffer()
                 self.subtitles?.clear()
+                // Re-sync once the suppression window closes — covers the
+                // case where no further source state events arrive (e.g.
+                // the source's `play`/`pause` event fired during the
+                // suppressed window and won't fire again).
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.5) { [weak self] in
+                    guard let self = self else { return }
+                    self.suppressAlignmentUntil = nil
+                    if let playing = self.source.observedSourcePlaying {
+                        self.alignBroadcast(toSourcePlaying: playing)
+                    }
+                }
             }
             .store(in: &cancellables)
     }
@@ -115,6 +142,15 @@ final class PlayPauseCoordinator {
         // alignments happen when state events flow in.
         guard broadcast.engineSetupComplete else {
             print("[coordinator] state event arrived before engine ready; deferred")
+            return
+        }
+
+        // Suppress alignment for the post-seek rebuffer window so the
+        // source player's transient state changes during the seek don't
+        // flip the broadcast's play state. See `suppressAlignmentUntil`
+        // for context.
+        if let until = suppressAlignmentUntil, Date() < until {
+            print("[coordinator] alignment suppressed (rebuffer window) — sourcePlaying=\(sourcePlaying)")
             return
         }
 

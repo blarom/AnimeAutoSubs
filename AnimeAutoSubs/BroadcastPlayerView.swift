@@ -18,6 +18,15 @@ struct BroadcastPlayerView: View {
     /// command on release.
     @State private var isScrubbing = false
     @State private var scrubTarget: Double = 0
+    /// True from the moment a seek is dispatched (slider release / skip
+    /// click) until the source confirms the new playhead via
+    /// `sourceCurrentTime`. During this window the slider stays pinned
+    /// at `scrubTarget` instead of snapping back to the pre-seek
+    /// position while the seek round-trips through the extension. Times
+    /// out after `seekConfirmTimeout` so a dropped state event doesn't
+    /// strand the slider forever.
+    @State private var awaitingSeekConfirmation = false
+    private let seekConfirmTimeout: TimeInterval = 3.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,6 +35,14 @@ struct BroadcastPlayerView: View {
             playbackBar
         }
         .background(Color.black)
+        .onChange(of: mediaSource.sourceCurrentTime) { _, newTime in
+            // Source confirmed the seek (its currentTime arrived within
+            // ~1 s of where we asked it to go). Drop the slider pin so
+            // it tracks live time again.
+            if awaitingSeekConfirmation && abs(newTime - scrubTarget) < 1.0 {
+                awaitingSeekConfirmation = false
+            }
+        }
     }
 
     // MARK: - Playback controls (bottom bar)
@@ -57,7 +74,7 @@ struct BroadcastPlayerView: View {
                             scrubTarget = sliderValue
                         } else {
                             isScrubbing = false
-                            onSeek(scrubTarget)
+                            beginSeek(toTarget: scrubTarget)
                         }
                     }
                 )
@@ -101,7 +118,7 @@ struct BroadcastPlayerView: View {
 
     private func skipButton(systemName: String, delta: Double, help: String) -> some View {
         Button {
-            onSkip(delta)
+            beginSkip(by: delta)
         } label: {
             Image(systemName: systemName)
                 .font(.system(size: 18, weight: .medium))
@@ -114,16 +131,54 @@ struct BroadcastPlayerView: View {
         .help(help)
     }
 
-    /// Slider position: tracks the user's drag while scrubbing, otherwise
-    /// mirrors the live source playback time.
-    private var sliderValue: Double {
-        isScrubbing ? scrubTarget : mediaSource.sourceCurrentTime
+    /// Common entry for "user just initiated a seek to an absolute time".
+    /// Pins the slider at `target` until the source confirms (or until
+    /// `seekConfirmTimeout` elapses), then issues the seek.
+    private func beginSeek(toTarget target: Double) {
+        scrubTarget = target
+        awaitingSeekConfirmation = true
+        onSeek(target)
+        scheduleSeekConfirmTimeout()
     }
 
-    /// Current-time label: shows the scrub target while dragging so the
-    /// numeric readout matches what the slider thumb is pointing at.
+    /// Common entry for "user just clicked a ±N skip button". Computes
+    /// the target (current source time + delta, clamped to duration)
+    /// and pins the slider at it for the round-trip.
+    private func beginSkip(by delta: Double) {
+        let clamped = max(0, min(mediaSource.sourceDuration, mediaSource.sourceCurrentTime + delta))
+        scrubTarget = clamped
+        awaitingSeekConfirmation = true
+        onSkip(delta)
+        scheduleSeekConfirmTimeout()
+    }
+
+    /// Safety net: clear `awaitingSeekConfirmation` after a fixed timeout
+    /// even if the source never echoes a matching `currentTime`. Without
+    /// it, a dropped state event would strand the slider at the scrub
+    /// target indefinitely.
+    private func scheduleSeekConfirmTimeout() {
+        let token = scrubTarget
+        DispatchQueue.main.asyncAfter(deadline: .now() + seekConfirmTimeout) {
+            if awaitingSeekConfirmation && scrubTarget == token {
+                awaitingSeekConfirmation = false
+            }
+        }
+    }
+
+    /// Slider position: tracks the user's drag while scrubbing, holds
+    /// the just-released target until the source's currentTime catches
+    /// up (prevents the slider from bouncing back to the pre-seek
+    /// position during the seek round-trip), otherwise mirrors the
+    /// live source playback time.
+    private var sliderValue: Double {
+        if isScrubbing || awaitingSeekConfirmation { return scrubTarget }
+        return mediaSource.sourceCurrentTime
+    }
+
+    /// Current-time label: matches the slider thumb's position.
     private var displayedTime: Double {
-        isScrubbing ? scrubTarget : mediaSource.sourceCurrentTime
+        if isScrubbing || awaitingSeekConfirmation { return scrubTarget }
+        return mediaSource.sourceCurrentTime
     }
 
     private var sourceTimeAvailable: Bool {
@@ -146,7 +201,16 @@ struct BroadcastPlayerView: View {
     // MARK: - Video area
 
     private var videoArea: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
+            // BACK: black + (if buffering/starting/initial-paused)
+            // progress panel. Always present so it's visible the instant
+            // the video frame above goes transparent.
+            statePanel
+
+            // FRONT: video frame, hidden via opacity when not actively
+            // rendering. CALayer with effective opacity 0 doesn't paint,
+            // so the panel underneath shows regardless of NSViewRep
+            // z-order quirks.
             VideoLayerHost(layer: manager.videoLayer)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .aspectRatio(displayAspect, contentMode: .fit)
@@ -163,9 +227,10 @@ struct BroadcastPlayerView: View {
                         .allowsHitTesting(false)
                     }
                 }
-
-            bufferingOverlay
-
+                .opacity(videoFrameVisible ? 1 : 0)
+        }
+        .frame(minHeight: 240)
+        .overlay(alignment: .topTrailing) {
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 14, weight: .medium))
@@ -177,7 +242,55 @@ struct BroadcastPlayerView: View {
             .help("Close broadcast")
             .padding(8)
         }
-        .frame(minHeight: 240)
+    }
+
+    /// True iff the broadcast pipeline is actively rendering frames to
+    /// the layer (i.e. not warming up, rebuffering, or sitting in the
+    /// initial "source paused, never emitted a frame" state).
+    private var videoFrameVisible: Bool {
+        switch manager.mode {
+        case .buffering, .starting:
+            return false
+        case .idle, .playing, .stopping:
+            return !(manager.isPaused && !manager.hasEverEmittedFrame)
+        }
+    }
+
+    /// Behind-the-video panel. Always present so we can swap the video
+    /// frame to opacity 0 over it without z-order acrobatics. Content
+    /// switches based on `manager.mode` and the initial-paused state.
+    @ViewBuilder
+    private var statePanel: some View {
+        ZStack {
+            Color.black
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            switch manager.mode {
+            case .buffering(let progress):
+                let remaining = max(0, manager.delaySeconds * (1 - progress))
+                VStack(spacing: 10) {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(.white)
+                        .frame(width: 220)
+                    Text(String(format: "Buffering… %.1fs", remaining))
+                        .font(.system(size: 14, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white)
+                }
+            case .starting:
+                ProgressView().tint(.white)
+            case .idle, .playing, .stopping:
+                if manager.isPaused && !manager.hasEverEmittedFrame {
+                    VStack(spacing: 12) {
+                        Image(systemName: "pause.circle")
+                            .font(.system(size: 36))
+                            .foregroundColor(.white.opacity(0.7))
+                        Text("Source paused — click Play to start")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+            }
+        }
     }
 
     private func mapVisionRectToView(_ rect: CGRect, viewSize: CGSize) -> CGRect {
@@ -190,45 +303,6 @@ struct BroadcastPlayerView: View {
         // Tight padding around detected text (just enough to fully cover descender/ascender bounds)
         let pad: CGFloat = 2
         return CGRect(x: x - pad, y: y - pad, width: w + pad * 2, height: h + pad * 2)
-    }
-
-    private var bufferingOverlay: some View {
-        Group {
-            if case .buffering(let progress) = manager.mode {
-                let remaining = max(0, manager.delaySeconds * (1 - progress))
-                ZStack {
-                    Color.black.opacity(0.7)
-                    VStack(spacing: 12) {
-                        ProgressView(value: progress)
-                            .progressViewStyle(.linear)
-                            .tint(.white)
-                            .frame(width: 200)
-                        Text(String(format: "Buffering… %.1fs", remaining))
-                            .font(.system(size: 14, weight: .medium, design: .monospaced))
-                            .foregroundColor(.white)
-                    }
-                }
-                .transition(.opacity)
-            } else if case .starting = manager.mode {
-                ZStack {
-                    Color.black.opacity(0.7)
-                    ProgressView().tint(.white)
-                }
-            } else if manager.isPaused && !manager.hasEverEmittedFrame {
-                ZStack {
-                    Color.black
-                    VStack(spacing: 12) {
-                        Image(systemName: "pause.circle")
-                            .font(.system(size: 36))
-                            .foregroundColor(.white.opacity(0.7))
-                        Text("Source paused — click Play to start")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-                }
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: manager.mode)
     }
 
     private var subtitleArea: some View {

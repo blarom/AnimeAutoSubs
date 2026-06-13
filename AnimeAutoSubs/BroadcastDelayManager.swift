@@ -87,6 +87,17 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
         /// for the dispatch-to-main + SwiftUI invalidate latency (~80ms in practice)
         /// so the blur lands on screen at the same compositor cycle as the frame.
         static let visionActivationLeadSeconds: CFTimeInterval = 0.08
+
+        /// Grace window after a flush during which incoming video/audio
+        /// samples are dropped. SCStream's pipeline alone is ~50–100 ms,
+        /// but the source player's actual seek + render time can stretch
+        /// to several hundred ms on streamed video — frames captured
+        /// during that interval still show the pre-seek position and
+        /// would leak into the new buffer with a post-flush handler
+        /// timestamp. 800 ms covers the typical streaming-player seek
+        /// latency comfortably; the cost is dropping ~800 ms worth of
+        /// post-seek content, invisible inside the 5 s rebuffer.
+        static let postFlushDropSeconds: CFTimeInterval = 0.8
     }
 
     // MARK: - Published state
@@ -280,8 +291,11 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
         self.stream = stream
 
         await MainActor.run {
+            self.queueLock.lock()
+            self.rebufferCycle &+= 1
             self.captureStartTime = CACurrentMediaTime()
             self.hasStartedPlayback = false
+            self.queueLock.unlock()
             self.mode = .buffering(progress: 0)
             self.startPump()
         }
@@ -362,8 +376,11 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
 
         if isQueueEmpty {
             // Empty buffer (likely initial pause). Restart warmup with fresh capture.
+            queueLock.lock()
+            rebufferCycle &+= 1
             captureStartTime = CACurrentMediaTime()
             hasStartedPlayback = false
+            queueLock.unlock()
             isPaused = false
             mode = .buffering(progress: 0)
             if audioEngine.isRunning {
@@ -429,26 +446,61 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
         }
     }
 
-    /// Discard buffered video/audio and re-warm. Called by the coordinator
-    /// after the user seeks the source — the frames we've captured are
-    /// now at the wrong media time, so we throw them away and rebuild a
-    /// fresh `delaySeconds`-long window from what the capture stream
-    /// sends next. The broadcast view shows the "Buffering…" overlay
-    /// during the warmup.
+    /// Monotonic counter that increments every time the capture buffer
+    /// is reset to its warm-up phase (`start`, `flushAndRebuffer`, the
+    /// empty-queue branch of `resume`). Used to invalidate stale pump
+    /// → `beginPlaybackPhase` dispatches across a reset: the pump
+    /// captures the cycle at the moment it decides to transition and
+    /// passes it through; `beginPlaybackPhase` aborts if the cycle has
+    /// changed since (i.e. a new rebuffer started in the meantime). All
+    /// reads/writes under `queueLock`.
+    private var rebufferCycle: Int = 0
+
+    /// Capture-time (CACurrentMediaTime) of the most recent seek. Used
+    /// by the transcription pipeline to discard speech segments whose
+    /// audio predates the seek — without this, in-flight whisper jobs
+    /// (and audio still buffered in the VAD when the seek happens)
+    /// surface as stale subtitles a few seconds after the rebuffer.
+    /// Plain `var`; the read at the transcription worker tolerates a
+    /// minor race because the worst case is a single extra/missed
+    /// discard.
+    var lastSeekAt: CFTimeInterval = 0
+
+    /// Discard buffered video/audio and re-warm. Called after the user
+    /// seeks the source — captured frames are now at the wrong media
+    /// time, so we throw them away and rebuild a fresh `delaySeconds`-
+    /// long window from what the capture stream sends next. The view
+    /// shows the "Buffering…" panel during the warmup.
     ///
-    /// `playerNode.reset()` (not `stop()`) clears the pre-seek scheduled
-    /// buffers without putting the node into a stopped state — when the
-    /// pump starts scheduling fresh buffers after rebuffer, they play
-    /// immediately without needing another `play()` call.
+    /// `playerNode.stop()` (not `reset()`) is required: only `stop`
+    /// flips `isPlaying` to false, which is what the wake-up guard in
+    /// `beginPlaybackPhase` checks before calling `play()` again.
     func flushAndRebuffer() {
         queueLock.lock()
+        rebufferCycle &+= 1
         videoQueue.removeAll()
         audioQueue.removeAll()
-        queueLock.unlock()
-        captureStartTime = CACurrentMediaTime()
+        let now = CACurrentMediaTime()
+        captureStartTime = now
+        lastSeekAt = now
         hasStartedPlayback = false
         pauseStartTime = nil
-        playerNode.reset()
+        queueLock.unlock()
+        playerNode.stop()
+        // Drop the stale pre-seek CGImage so the layer doesn't briefly
+        // paint it the instant the opacity-hide ends at mode=.playing.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoLayer.contents = nil
+        CATransaction.commit()
+        // Clear the English-subtitle blur state. The rects were detected
+        // on a pre-seek frame and would otherwise persist (drawn as a
+        // SwiftUI overlay above the video) for the first few frames
+        // post-resume until the next Vision pass overwrites them.
+        pendingRectsLock.lock()
+        pendingRects.removeAll()
+        pendingRectsLock.unlock()
+        detectedSubtitleRects = []
         mode = .buffering(progress: 0)
     }
 
@@ -530,21 +582,33 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
     }
 
     private func pumpTick() {
-        guard let captureStart = captureStartTime else { return }
+        // Snapshot warmup state atomically. captureStart + cycle must
+        // be read together; mixing a stale captureStart with a fresh
+        // cycle would compute elapsed >> delaySeconds and trip a
+        // spurious transition to .playing mid-rebuffer.
+        queueLock.lock()
+        guard let captureStart = captureStartTime else { queueLock.unlock(); return }
+        let started = hasStartedPlayback
+        let tickCycle = rebufferCycle
+        queueLock.unlock()
+
         let now = CACurrentMediaTime()
         let elapsed = now - captureStart
-
-        queueLock.lock()
-        let started = hasStartedPlayback
-        queueLock.unlock()
 
         if !started {
             if elapsed >= delaySeconds {
                 queueLock.lock()
+                // Re-verify cycle hasn't changed since our snapshot —
+                // if a flush ran between, abort the transition; the new
+                // rebuffer cycle owns playback start.
+                guard rebufferCycle == tickCycle else {
+                    queueLock.unlock()
+                    return
+                }
                 hasStartedPlayback = true
                 queueLock.unlock()
                 DispatchQueue.main.async { [weak self] in
-                    self?.beginPlaybackPhase()
+                    self?.beginPlaybackPhase(forCycle: tickCycle)
                 }
             } else {
                 let progress = min(elapsed / delaySeconds, 1.0)
@@ -635,7 +699,16 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
     // MARK: - Audio engine
 
     @MainActor
-    private func beginPlaybackPhase() {
+    private func beginPlaybackPhase(forCycle expectedCycle: Int) {
+        // Cycle guard: abort if another flush bumped the cycle between
+        // dispatch and now. The new cycle's pump will dispatch its own
+        // beginPlaybackPhase when its warmup elapses.
+        queueLock.lock()
+        let started = hasStartedPlayback
+        let currentCycle = rebufferCycle
+        queueLock.unlock()
+        guard started, currentCycle == expectedCycle else { return }
+
         if !audioEngine.isRunning, let format = captureAudioFormat {
             // playerNode → gainEQ → mainMixerNode → outputNode. The EQ lets us
             // push past unity gain when the slider is above 100%.
@@ -658,15 +731,18 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
             do {
                 try audioEngine.start()
                 applyVolume()
-                playerNode.play()
                 engineSetupComplete = true
             } catch {
                 print("[audio] engine.start() failed: \(error)")
             }
-        } else if !playerNode.isPlaying {
-            // Engine already running but playerNode is stopped/reset —
-            // happens after `flushAndRebuffer()` finishes its warmup.
-            // Kick the node so newly scheduled buffers actually render.
+        }
+        // Always ensure the player node is playing on entry to this
+        // phase. Covers three call sites: first warmup (engine was just
+        // configured, node has never played), post-pause resume
+        // (`pause()` set isPlaying=false), and post-seek rebuffer
+        // (`flushAndRebuffer` → `stop()` set isPlaying=false). play()
+        // on an already-playing node is a no-op per Apple docs.
+        if !playerNode.isPlaying {
             playerNode.play()
         }
         self.mode = .playing
@@ -760,12 +836,23 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
 
     private func handleVideo(_ sb: CMSampleBuffer) {
         if isPaused { return }
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sb) else { return }
+        let now = CACurrentMediaTime()
+        // Drop frames likely to be in-flight from SCStream's pre-flush
+        // pipeline. handleVideo runs ~50–100 ms after the pixel is
+        // actually captured by SC; if a seek+flush happened in that
+        // window, the frame's content is pre-seek but our stored
+        // captureTime would be `now` (post-flush) and the pump would
+        // emit it as the first frame after the rebuffer. A 200 ms grace
+        // safely covers typical pipeline latency.
+        queueLock.lock()
+        let postFlushAge = now - lastSeekAt
+        queueLock.unlock()
+        if postFlushAge < Tuning.postFlushDropSeconds { return }
 
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sb) else { return }
         // Convert immediately so the IOSurface backing is released and SC can keep producing.
         guard let cgImage = makeCGImage(from: pixelBuffer) else { return }
 
-        let now = CACurrentMediaTime()
         queueLock.lock()
         videoQueue.append(VideoEntry(image: cgImage, captureTime: now))
         queueLock.unlock()
@@ -785,17 +872,26 @@ final class BroadcastDelayManager: NSObject, ObservableObject, SCStreamDelegate,
                     guard let self = self else { return }
                     self.queueLock.lock()
                     self.hasStartedPlayback = true
+                    let cycle = self.rebufferCycle
                     self.queueLock.unlock()
-                    self.beginPlaybackPhase()
+                    self.beginPlaybackPhase(forCycle: cycle)
                 }
             }
         }
 
         if isPaused { return }
 
+        let now = CACurrentMediaTime()
+        // Same post-flush grace as video: in-flight audio captured
+        // before the seek would otherwise be the first thing the user
+        // hears when playback resumes.
+        queueLock.lock()
+        let postFlushAge = now - lastSeekAt
+        queueLock.unlock()
+        if postFlushAge < Tuning.postFlushDropSeconds { return }
+
         speechSegmenter.feed(pcm)
 
-        let now = CACurrentMediaTime()
         queueLock.lock()
         audioQueue.append(AudioEntry(pcm: pcm, captureTime: now))
         queueLock.unlock()
